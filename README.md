@@ -40,6 +40,22 @@ below should be this same hardware.
 
 ![Product listing screenshot](docs/product-listing.png)
 
+Other listings that appear to sell the same rebadged hardware (same
+"125KHz + 13.56MHz, USB, UID/T5577-writable" description and form
+factor) but haven't been independently verified against this driver —
+check the device against [How to check if your device is
+compatible](#how-to-check-if-your-device-is-compatible) below before
+relying on it:
+
+- [LEXI RFID NFC Duplicator, 125KHz Key fob Copier, RFID Smart Card
+  Reader Writer, 13.56MHz Encrypted Programmer, USB Interface, with
+  UID/T5577 Writable Key Cards and
+  Software](https://www.amazon.com/dp/B088FB92XL) (Amazon)
+- [JASAG Smart Access Control Copier, RFID Reader Writer, 125KHz
+  Duplicator, 13.56MHz Encrypted Card Decoder, NFC Tag Replicator, with
+  Writable Key Fobs, Free
+  Software](https://www.amazon.com/dp/B0C591TF5C) (Amazon)
+
 ### How to check if your device is compatible
 
 1. Plug the reader in and run:

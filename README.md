@@ -31,6 +31,15 @@ brand printed on the device — these cheap copier gadgets get rebadged
 under many storefront names, so a device sold under a different name may
 well be this same hardware.
 
+The specific listing this driver was built and tested against:
+[RFID Copier Duplicator 125KHz Key fob NFC Smart Card Reader Writer
+13.56MHz Encrypted Programmer USB UID T5577 EM4305 Cards
+Tags](https://www.aliexpress.us/item/2255800142825470.html) (AliExpress).
+Any listing selling the same "Copier ONLY" black NS106 unit pictured
+below should be this same hardware.
+
+![Product listing screenshot](docs/product-listing.png)
+
 ### How to check if your device is compatible
 
 1. Plug the reader in and run:

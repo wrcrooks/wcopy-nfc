@@ -24,11 +24,11 @@ with WCopyReader() as reader:
 
     payload = ndef.build_uri_tlv(url)
     print(f"Writing {len(payload)} bytes: {url!r}")
-    reader.write_data(tag.uid, payload, verify=True)
+    reader.write_data(tag, payload, verify=True)
     print("Write + verify-on-write succeeded.")
 
     print("Re-reading from scratch to double check...")
-    raw = reader.read_ndef(tag.uid)
+    raw = reader.read_ndef(tag)
     read_back = ndef.parse_uri_tlv(raw)
     print("Read back:", read_back)
     print("Matches what was written:", read_back == url)

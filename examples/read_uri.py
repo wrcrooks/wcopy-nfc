@@ -15,7 +15,7 @@ with WCopyReader() as reader:
     print(f"Tag detected, UID={tag.uid.hex()}")
 
     try:
-        raw = reader.read_ndef(tag.uid)
+        raw = reader.read_ndef(tag)
         url = ndef.parse_uri_tlv(raw)
     except (WCopyError, ValueError) as e:
         print(f"Read failed: {e}")

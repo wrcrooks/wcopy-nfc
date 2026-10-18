@@ -60,14 +60,18 @@ layout) was an early mistake here that made every real tag response look
 malformed and get silently discarded, surfacing as a false "no tag
 detected" even though the tag was being read fine.
 
-Tag protocol: despite being marketed as an "NFC" reader/writer, the tags
-used are Mifare Classic 1K (or Classic-compatible "magic"/UID-changeable
-clones popular for these cheap copier gadgets) addressed in 16-byte
-blocks/4-block sectors — NOT NTAG/Ultralight 4-byte pages, and NOT MAD
-(Mifare Application Directory) formatted. This driver writes a bare NDEF
+Tag protocol: this driver handles both 13.56 MHz Type-A families and picks
+one per tap from the SAK (see _tag_kind) — NTAG/Ultralight (NFC Forum Type
+2) via simple 4-byte page writes, and Mifare Classic 1K the hard way
+described below. The Mifare Classic path is the one that needed reverse-
+engineering: the vendor's Windows tool only ever writes Mifare Classic 1K
+(or the Classic-compatible "magic"/UID-changeable clones popular for these
+cheap copier gadgets), addressed in 16-byte blocks/4-block sectors and NOT
+MAD (Mifare Application Directory) formatted — it writes a bare NDEF
 message starting at block 4 (sector 1), skipping sector 0 (blocks 0-3)
-entirely — sector 0 holds the UID/manufacturer block, which this module
-also never touches. Each sector after sector 0 needs, in order:
+entirely, since sector 0 holds the UID/manufacturer block, which this
+module also never touches. Each Classic sector after sector 0 needs, in
+order:
   1. Authenticate (Mifare command 0x60/0x61, Auth-with-KeyA/KeyB) for that
      sector, using whichever of the known keys currently unlocks it.
   2. Write each of that sector's 3 data blocks (16 bytes each) via
@@ -146,6 +150,22 @@ TAG_CMD_AUTH_KEY_A = 0x60
 TAG_CMD_AUTH_KEY_B = 0x61
 TAG_CMD_COMPATIBILITY_WRITE = 0xA0
 TAG_CMD_READ = 0x30
+# NTAG / Ultralight use a different write command (4-byte page write)
+# than Mifare Classic's 16-byte COMPATIBILITY_WRITE.
+NTAG_CMD_WRITE = 0xA2
+
+# NTAG / Ultralight (NFC Forum Type 2) geometry: 4-byte pages, no keys and
+# no sector trailers. Pages 0-3 hold the UID, lock bytes and capability
+# container; user NDEF data starts at page 4. A READ (0x30) returns 16
+# bytes — 4 consecutive pages — in one exchange.
+NTAG_PAGE_SIZE = 4
+NTAG_PAGES_PER_READ = 4
+NTAG_USER_START_PAGE = 4
+
+# SAK (SEL_RES) values. A fully-selected NTAG/Ultralight answers 0x00;
+# Mifare Classic sets bit 3 (0x08 for 1K, 0x18 for 4K).
+SAK_NTAG = 0x00
+SAK_CLASSIC_BIT = 0x08
 
 TFI_HOST_TO_CHIP = 0xD4
 TFI_CHIP_TO_HOST = 0xD5
@@ -362,8 +382,22 @@ class WCopyReader:
         broader authentication still covers it).
         """
         block = sector * BLOCKS_PER_SECTOR + (BLOCKS_PER_SECTOR - 1)
+        first_attempt = True
         for key in KNOWN_KEYS:
             for auth_cmd in auth_cmds:
+                # A failed auth drops this reader's RF session (see
+                # _reselect), so every attempt after the first needs a
+                # fresh select — otherwise a correct key positioned later
+                # in KNOWN_KEYS fails against the dead session left behind
+                # by the earlier misses, which looked exactly like a tag
+                # "locked with an unknown key" even for a blank factory tag
+                # whose default key was in the list all along. The caller
+                # already selects right before the first attempt, so skip
+                # the redundant reselect there; on success we return with
+                # the just-selected session still live and authenticated.
+                if not first_attempt:
+                    self._reselect(uid)
+                first_attempt = False
                 try:
                     self._in_data_exchange(bytes([auth_cmd, block]) + key + uid)
                     return key
@@ -422,7 +456,87 @@ class WCopyReader:
                 f"Note: couldn't update sector {sector}'s trailer ({e}) — the data itself was still written fine."
             )
 
-    def write_data(self, uid: bytes, payload: bytes, verify: bool = True) -> None:
+    # -- tag-type dispatch --------------------------------------------------
+
+    @staticmethod
+    def _tag_kind(sel_res: int) -> str:
+        """Maps a tag's SAK to the write/read path it needs. Mifare Classic
+        and NTAG/Ultralight use completely different commands and memory
+        layouts, so every public write/read picks one from this."""
+        if sel_res == SAK_NTAG:
+            return "ntag"
+        if sel_res & SAK_CLASSIC_BIT:
+            return "classic"
+        raise WCopyError(
+            f"Unsupported tag (SAK={sel_res:#04x}) — this tool writes MIFARE Classic "
+            "(SAK 0x08/0x18) and NTAG/Ultralight (SAK 0x00) tags only."
+        )
+
+    def write_data(self, tag: "TagInfo", payload: bytes, verify: bool = True) -> None:
+        """Writes `payload` (an NDEF TLV, see ndef.py) to whatever tag type
+        `tag` is, chosen automatically from its SAK: NTAG/Ultralight via
+        4-byte page writes, Mifare Classic via the authenticated
+        sector/block path. Neither path ever touches the UID/manufacturer
+        area (Classic sector 0 / NTAG pages 0-3)."""
+        if self._tag_kind(tag.sel_res) == "ntag":
+            self._ntag_write_data(tag.uid, payload, verify=verify)
+        else:
+            self._classic_write_data(tag.uid, payload, verify=verify)
+
+    # -- NTAG / Ultralight (Type 2) -----------------------------------------
+
+    def _ntag_write_page(self, page: int, four: bytes) -> None:
+        assert len(four) == NTAG_PAGE_SIZE
+        self._in_data_exchange(bytes([NTAG_CMD_WRITE, page]) + four)
+
+    def _ntag_read_pages(self, start_page: int) -> bytes:
+        """READ (0x30) returns 16 bytes = 4 pages starting at `start_page`."""
+        return self._in_data_exchange(bytes([TAG_CMD_READ, start_page]))[: NTAG_PAGES_PER_READ * NTAG_PAGE_SIZE]
+
+    def _ntag_write_data(self, uid: bytes, payload: bytes, verify: bool = True) -> None:
+        """Writes `payload` to the user area (page 4 onward) one 4-byte page
+        at a time. No authentication and no RF-session reselect dance: unlike
+        Mifare Classic, Type 2 tags have no keys, so there are no failed-auth
+        session drops to recover from (see _reselect). Leaves the capability
+        container (page 3) alone — factory NTAGs already ship with it set."""
+        data = payload
+        if len(data) % NTAG_PAGE_SIZE:
+            data += b"\x00" * (NTAG_PAGE_SIZE - len(data) % NTAG_PAGE_SIZE)
+        for i in range(0, len(data), NTAG_PAGE_SIZE):
+            page = NTAG_USER_START_PAGE + i // NTAG_PAGE_SIZE
+            chunk = data[i : i + NTAG_PAGE_SIZE]
+            self._ntag_write_page(page, chunk)
+        if verify:
+            readback = bytearray()
+            page = NTAG_USER_START_PAGE
+            while len(readback) < len(data):
+                readback.extend(self._ntag_read_pages(page))
+                page += NTAG_PAGES_PER_READ
+            if bytes(readback[: len(data)]) != data:
+                raise WCopyError(
+                    f"Verification failed: wrote {data.hex()}, read back {bytes(readback[:len(data)]).hex()}"
+                )
+
+    def _ntag_read_ndef(self, uid: bytes, max_bytes: int = 1024) -> bytes:
+        """Reads just enough of the user area to capture one NDEF TLV
+        (03 <len> ... FE), the NTAG counterpart of _classic_read_ndef."""
+        out = bytearray()
+        page = NTAG_USER_START_PAGE
+        needed: int | None = None
+        while needed is None or len(out) < needed:
+            if len(out) >= max_bytes:
+                raise WCopyError("No complete NDEF TLV found within the read limit — tag may be blank or corrupt.")
+            out.extend(self._ntag_read_pages(page))
+            page += NTAG_PAGES_PER_READ
+            if needed is None and len(out) >= 2:
+                if out[0] != 0x03:
+                    raise WCopyError("No NDEF TLV found (tag may be blank or written by something else).")
+                needed = 2 + out[1] + 1  # tag byte + length byte + record + terminator
+        return bytes(out[:needed])
+
+    # -- Mifare Classic -----------------------------------------------------
+
+    def _classic_write_data(self, uid: bytes, payload: bytes, verify: bool = True) -> None:
         """Writes `payload` as raw bytes starting at block 4 (sector 1),
         authenticating each sector and best-effort updating its trailer as
         needed. Never touches sector 0 (blocks 0-3, the UID/manufacturer
@@ -484,7 +598,14 @@ class WCopyReader:
             block += 1
         return bytes(out)
 
-    def read_ndef(self, uid: bytes, max_blocks: int = 64) -> bytes:
+    def read_ndef(self, tag: "TagInfo", max_blocks: int = 64) -> bytes:
+        """Reads one NDEF TLV off `tag`, picking the NTAG or Classic path
+        automatically from its SAK."""
+        if self._tag_kind(tag.sel_res) == "ntag":
+            return self._ntag_read_ndef(tag.uid, max_bytes=max_blocks * BLOCK_SIZE)
+        return self._classic_read_ndef(tag.uid, max_blocks=max_blocks)
+
+    def _classic_read_ndef(self, uid: bytes, max_blocks: int = 64) -> bytes:
         """Reads only as many blocks as needed to capture one NDEF TLV
         (03 <len> ... FE, see ndef.py) written by write_data, rather than
         requiring the caller to already know the payload length up front

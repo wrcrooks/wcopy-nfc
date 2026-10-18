@@ -103,10 +103,18 @@ contribution this project is meant to collect.
 
 ### Supported tags
 
-The devices in this family write **Mifare Classic 1K** cards (or
-Classic-compatible "magic"/UID-changeable clones commonly sold for these
-copier gadgets) — not NTAG/Ultralight, and not MAD-formatted. Any
-Mifare Classic 1K tag should work.
+Both common 13.56 MHz tag families are supported, and the type is
+detected automatically from each tag's SAK on `poll_for_tag` — there's no
+mode to set:
+
+- **NTAG / Ultralight** (NFC Forum Type 2 — e.g. NTAG213/215/216, SAK
+  `0x00`): written via 4-byte page writes (`0xA2`), no keys. These are the
+  tags **iPhones can read** — Apple's Core NFC does not support Mifare
+  Classic, so if you need tap-to-URL on iOS, use an NTAG.
+- **Mifare Classic 1K** (SAK `0x08`, including the "magic"/UID-changeable
+  clones commonly sold for these copier gadgets): the original path —
+  authenticated sectors, `0xA0` block writes, a bare NDEF TLV at block 4
+  (not MAD-formatted). Read by Android, but not by iPhones.
 
 ## Installation
 
@@ -142,9 +150,9 @@ with WCopyReader() as reader:
     print("UID:", tag.uid.hex())
 
     payload = ndef.build_uri_tlv("https://example.com")
-    reader.write_data(tag.uid, payload, verify=True)
+    reader.write_data(tag, payload, verify=True)   # NTAG or Classic, auto-detected
 
-    raw = reader.read_ndef(tag.uid)
+    raw = reader.read_ndef(tag)
     print("Wrote:", ndef.parse_uri_tlv(raw))
 ```
 
@@ -161,14 +169,17 @@ See [`examples/`](examples/) for standalone scripts:
   manager (`with WCopyReader() as reader:`) or call `.close()` yourself.
   - `poll_for_tag(timeout_s=3.0) -> TagInfo` — waits for a tag, raises
     `NoTagPresentError` on timeout.
-  - `write_data(uid, payload, verify=True)` — writes raw bytes starting
-    at block 4 (sector 1), authenticating and best-effort updating each
-    sector's trailer as it goes. Never touches sector 0.
-  - `read_data(uid, num_blocks)` — reads a known number of data blocks
-    back.
-  - `read_ndef(uid, max_blocks=64)` — reads exactly as many blocks as a
+  - `write_data(tag, payload, verify=True)` — writes an NDEF TLV to the
+    `TagInfo` from `poll_for_tag`, choosing the path from its SAK:
+    NTAG/Ultralight via 4-byte page writes, or Mifare Classic via the
+    authenticated sector/block path (best-effort updating each sector's
+    trailer). Never touches the UID area (Classic sector 0 / NTAG pages
+    0-3).
+  - `read_ndef(tag, max_blocks=64)` — reads exactly as much as a
     previously written NDEF TLV needs, without knowing the length ahead
-    of time.
+    of time; also auto-detects NTAG vs Classic from the tag's SAK.
+  - `read_data(uid, num_blocks)` — low-level Mifare Classic read of a
+    known number of data blocks (takes a raw UID; Classic only).
 - **`ndef`** module — `build_uri_tlv(url) -> bytes` and
   `parse_uri_tlv(data) -> str` encode/decode a bare NDEF URI record the
   way this device's own tool writes it.
